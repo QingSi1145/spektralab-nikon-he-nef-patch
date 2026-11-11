@@ -1,0 +1,161 @@
+﻿diff --git a/engine/cmake/LibRaw.cmake b/src/engine/cmake/LibRaw.cmake
+index 76a17aa..70bf2b2 100644
+--- a/engine/cmake/LibRaw.cmake
++++ b/engine/cmake/LibRaw.cmake
+@@ -1,14 +1,17 @@
+ # Pinned standalone LibRaw build; no download or Python at configure/runtime.
+-set(SPEKTRALAB_LIBRAW_SOURCE "${SPEKTRALAB_DEPS_DIR}/LibRaw-0.22.2" CACHE PATH "Extracted official LibRaw 0.22.2 source")
++# Patched for the 202611 snapshot (LibRaw 0.23.0): its nikonhe decoder is the
++# only LibRaw that opens a Nikon Z50II / Z5II High Efficiency (HE/HE*) NEF,
++# and it carries the Z50_2 colour matrix 0.22.2 never had.
++set(SPEKTRALAB_LIBRAW_SOURCE "${SPEKTRALAB_DEPS_DIR}/LibRaw-0.23.0" CACHE PATH "Extracted official LibRaw 0.23.0 snapshot source")
+ if(NOT EXISTS "${SPEKTRALAB_LIBRAW_SOURCE}/libraw/libraw.h")
+-    message(FATAL_ERROR "Native RAW requires LibRaw 0.22.2; run engine/setup-libraw.ps1 (Windows) or engine/setup-libraw.sh (POSIX) and set SPEKTRALAB_LIBRAW_SOURCE")
++    message(FATAL_ERROR "Native RAW requires the LibRaw 0.23.0 snapshot; run engine/setup-libraw.ps1 (Windows) or engine/setup-libraw.sh (POSIX) and set SPEKTRALAB_LIBRAW_SOURCE")
+ endif()
+ file(STRINGS "${SPEKTRALAB_LIBRAW_SOURCE}/libraw/libraw_version.h" libraw_version REGEX "^#define LIBRAW_(MAJOR|MINOR|PATCH)_VERSION")
+ list(FIND libraw_version "#define LIBRAW_MAJOR_VERSION 0" libraw_major)
+-list(FIND libraw_version "#define LIBRAW_MINOR_VERSION 22" libraw_minor)
+-list(FIND libraw_version "#define LIBRAW_PATCH_VERSION 2" libraw_patch)
++list(FIND libraw_version "#define LIBRAW_MINOR_VERSION 23" libraw_minor)
++list(FIND libraw_version "#define LIBRAW_PATCH_VERSION 0" libraw_patch)
+ if(libraw_major EQUAL -1 OR libraw_minor EQUAL -1 OR libraw_patch EQUAL -1)
+-    message(FATAL_ERROR "This RAW integration is validated with LibRaw 0.22.2 only")
++    message(FATAL_ERROR "This RAW integration is validated with LibRaw 0.23.0 (202611 snapshot) only")
+ endif()
+ file(GLOB_RECURSE libraw_sources CONFIGURE_DEPENDS "${SPEKTRALAB_LIBRAW_SOURCE}/src/*.cpp")
+ # *_ph.cpp are replacement placeholders for LibRaw's no-postprocessing build,
+@@ -43,9 +46,9 @@ if(SPEKTRALAB_LIBRAW_OPENMP)
+     if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+         target_link_options(spk_libraw INTERFACE -fopenmp)
+     endif()
+-    # LibRaw 0.22.2 intentionally disables OpenMP for non-MSVC Windows
+-    # compilers unless explicitly opted in. PUBLIC keeps its inline allocator
+-    # definitions identical in the library and all consumers of libraw.h.
++    # LibRaw disables OpenMP for non-MSVC Windows compilers unless explicitly
++    # opted in. PUBLIC keeps its inline allocator definitions identical in the
++    # library and all consumers of libraw.h.
+     if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+         target_compile_definitions(spk_libraw PUBLIC LIBRAW_FORCE_OPENMP)
+     endif()
+diff --git a/engine/src/io/raw_decoder.cpp b/src/engine/src/io/raw_decoder.cpp
+index 1f55a69..78c998d 100644
+--- a/engine/src/io/raw_decoder.cpp
++++ b/engine/src/io/raw_decoder.cpp
+@@ -86,19 +86,13 @@ bool libraw_ok(int status, const char* stage, std::string& error) {
+     return false;
+ }
+ 
+-bool supported_compression(LibRaw& raw, std::string& error) {
+-    const char* decoder = raw.unpack_function_name();
+-    if (decoder && std::strstr(decoder, "nikon_he_load_raw") != nullptr) {
+-        const auto& model = raw.imgdata.idata.model;
+-        error = "RAW unpack (" +
+-            std::string(std::begin(model), std::find(std::begin(model), std::end(model), '\0')) +
+-            "): Nikon HE/HE* compression is not supported by bundled LibRaw " +
+-            LibRaw::version() +
+-            "; use a lossless-compressed NEF or externally converted RAW DNG";
+-        return false;
+-    }
+-    return true;
+-}
++// Nikon HE/HE* (TicoRAW) used to be refused here by name, because LibRaw 0.22.2
++// routed those files to its plain Nikon decoder and reported corrupt data. The
++// 0.23.0 202611 snapshot carries a real nikon_he_load_raw for the Z6III, Z8, Z9,
++// Zf, Z5II, Z50II and ZR, and it names the Z50_2 colour matrix, so the refusal
++// would now reject files the library decodes correctly. Decode failures belong
++// to LibRaw's own status codes; nothing here pre-empts them.
++bool supported_compression(LibRaw&, std::string&) { return true; }
+ 
+ void configure_compatible(libraw_output_params_t& params) {
+     params.user_qual = 3;  // AHD (LibRaw still selects its native X-Trans path).
+diff --git a/engine/setup-libraw.ps1 b/src/engine/setup-libraw.ps1
+index d63dca8..c58a1bd 100644
+--- a/engine/setup-libraw.ps1
++++ b/engine/setup-libraw.ps1
+@@ -1,13 +1,22 @@
+-# Download a fixed official release, verify before extraction. No Python needed.
++# Download the pinned LibRaw snapshot, verify before extraction. No Python needed.
++#
++# 0.22.2 (the previous pin) has no Nikon HE/HE* decoder: it routed a Z50II or
++# Z5II High Efficiency NEF to its plain Nikon decoder, which reported corrupt
++# data, so those files could not be opened at all. The 202611 snapshot
++# (LibRaw 0.23.0) carries a real nikon_he_load_raw, routes the Z6III, Z8, Z9,
++# Zf, Z5II, Z50II and ZR to it, and names the Z50_2 colour matrix. It is pinned
++# by commit, not by moving branch, so a later master cannot change the tree
++# under a build that was validated against this one.
+ [CmdletBinding()]
+ param([string]$DependencyDirectory = (Join-Path $PSScriptRoot '..\..\deps'))
+ $ErrorActionPreference = 'Stop'
+ $DependencyDirectory = [IO.Path]::GetFullPath($DependencyDirectory)
+ New-Item -ItemType Directory -Path $DependencyDirectory -Force | Out-Null
+-$archive = Join-Path $DependencyDirectory 'LibRaw-0.22.2.zip'
+-$source = Join-Path $DependencyDirectory 'LibRaw-0.22.2'
+-$url = 'https://codeload.github.com/LibRaw/LibRaw/zip/refs/tags/0.22.2'
+-$expected = '02275a04cf0d1477ab9fd7ee231ddea59e7b14497458da6e3ba957517d6655c7'
++$archive = Join-Path $DependencyDirectory 'LibRaw-0.23.0.zip'
++$source = Join-Path $DependencyDirectory 'LibRaw-0.23.0'
++$commit = 'a9a14b1970d188c25dade81f8326ff00a6e33649'
++$url = "https://codeload.github.com/LibRaw/LibRaw/zip/$commit"
++$expected = '8dc5d15096c3fb15f90415a6915f152489ed7c57b3755e7dde7b1ba81e710895'
+ if (-not (Test-Path -LiteralPath $archive)) { Invoke-WebRequest -Uri $url -OutFile $archive }
+ if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+     throw 'LibRaw archive checksum mismatch; existing files were not extracted or changed.'
+@@ -15,31 +24,34 @@ if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant
+ Add-Type -AssemblyName System.IO.Compression.FileSystem
+ $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+ try {
++    $root = $null
+     foreach ($entry in $zip.Entries) {
+-        $target = [IO.Path]::GetFullPath((Join-Path $DependencyDirectory $entry.FullName))
+-        if (-not $target.StartsWith($source + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and $target.TrimEnd('\') -ne $source) {
+-            throw 'Unsafe LibRaw archive path'
+-        }
++        $parts = $entry.FullName.Split('/', 2)
++        if (-not $root) { $root = $parts[0] }
++        if ($parts[0] -ne $root) { throw 'Unexpected LibRaw archive root' }
++        if ($parts.Count -eq 2 -and $parts[1].Contains('..')) { throw 'Unsafe LibRaw archive path' }
+     }
+-    if (Test-Path -LiteralPath $source) {
+-        $expectedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+-        foreach ($entry in $zip.Entries) {
+-            if (-not $entry.Name) { continue }
+-            $target = [IO.Path]::GetFullPath((Join-Path $DependencyDirectory $entry.FullName))
+-            [void]$expectedPaths.Add($target)
+-            if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw "Incomplete LibRaw source tree: $target" }
+-            $stream = $entry.Open()
+-            $hasher = [Security.Cryptography.SHA256]::Create()
+-            try { $digest = [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+-            finally { $hasher.Dispose(); $stream.Dispose() }
+-            if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() -ne $digest) {
+-                throw "Modified LibRaw source file: $target. Existing files were not overwritten."
++    if (-not (Test-Path -LiteralPath $source)) {
++        $temp = Join-Path $DependencyDirectory ('.verify-' + [guid]::NewGuid().ToString('N'))
++        New-Item -ItemType Directory -Path $temp | Out-Null
++        try {
++            [IO.Compression.ZipFile]::ExtractToDirectory($archive, $temp)
++            $fresh = Join-Path $temp $root
++            if (-not (Test-Path -LiteralPath (Join-Path $fresh 'libraw\libraw_version.h'))) {
++                throw 'LibRaw archive does not contain libraw/libraw_version.h'
+             }
+-        }
+-        foreach ($file in Get-ChildItem -LiteralPath $source -File -Recurse) {
+-            if (-not $expectedPaths.Contains($file.FullName)) { throw "Unexpected file in pinned LibRaw source: $($file.FullName)" }
++            # The snapshot is not a tagged release; its identity is the version tail.
++            $version = Get-Content -LiteralPath (Join-Path $fresh 'libraw\libraw_version.h') -Raw
++            if ($version -notmatch '(?m)^#define LIBRAW_VERSION_TAIL\s+\S*Snapshot202611') {
++                throw 'LibRaw archive is not the 202611 snapshot; nothing was installed'
++            }
++            if (-not ([IO.Path]::GetFullPath($fresh)).StartsWith($temp + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
++                throw 'Unsafe LibRaw extraction path'
++            }
++            Move-Item -LiteralPath $fresh -Destination $source
++        } finally {
++            if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+         }
+     }
+ } finally { $zip.Dispose() }
+-if (-not (Test-Path -LiteralPath $source)) { [IO.Compression.ZipFile]::ExtractToDirectory($archive, $DependencyDirectory) }
+-Write-Output "LibRaw 0.22.2: $source (archive SHA256 and existing source verified)."
++Write-Output "LibRaw 0.23.0 (202611 snapshot, $commit): $source (archive SHA256 verified)."
+

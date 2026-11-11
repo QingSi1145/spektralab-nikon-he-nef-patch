@@ -1,0 +1,19 @@
+# Build output and local toolchain leftovers — this repo holds a patch, not a build.
+build/
+build-*/
+deps/
+*.exe
+*.dll
+*.o
+*.a
+*.obj
+*.pdb
+*.ilk
+
+# Editor / OS
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
